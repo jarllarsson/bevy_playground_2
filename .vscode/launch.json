@@ -1,0 +1,59 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug executable 'bevy_playground_2'",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=bevy_playground_2",
+                    "--package=bevy_playground_2"
+                ],
+                "filter": {
+                    "name": "bevy_playground_2",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug unit tests in executable 'bevy_playground_2'",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--no-run",
+                    "--bin=bevy_playground_2",
+                    "--package=bevy_playground_2"
+                ],
+                "filter": {
+                    "name": "bevy_playground_2",
+                    "kind": "bin"
+                }
+            },
+            "args": [],
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "MSVC Debug File",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceRoot}/target/debug/bevy_playground_2.exe",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "console": "externalTerminal",
+            // Needed for asset server to find assets, points CARGO_MANIFEST_DIR to workspace where assets are.
+            // Not needed if we do cargo run as then the cargo dir is the same as workspace dir.
+            "env" : { "CARGO_MANIFEST_DIR" : "${workspaceFolder}" }
+        }
+    ]
+}

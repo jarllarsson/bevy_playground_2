@@ -1,7 +1,15 @@
 [package]
-name = "darkside"
+name = "bevy_playground_2"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
 bevy = "0.10"
+
+# Enable only a small amount of optimization in debug mode, so we can step
+[profile.dev]
+opt-level = 1
+
+# Enable max optimizations for dependencies, but not for our code:
+[profile.dev.package."*"]
+opt-level = 3
