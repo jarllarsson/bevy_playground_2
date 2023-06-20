@@ -6,6 +6,8 @@
 
 use bevy::{
     prelude::*,
+    reflect::TypeUuid,
+    render::render_resource::{AsBindGroup, ShaderRef},
     render::{
         extract_resource::{ExtractResource, ExtractResourcePlugin},
         render_asset::RenderAssets,
@@ -39,6 +41,10 @@ struct MyComputeShaderRenderTarget(Handle<Image>);
 #[derive(Resource)]
 struct MyComputeShaderRenderTargetBindGroup(BindGroup);
 
+#[derive(Component)]
+struct MainCamera;
+
+
 fn main() {
     App::new()
         //.insert_resource(ClearColor(Color::BLACK))
@@ -50,8 +56,10 @@ fn main() {
             }),
             ..default()
         }))
+        .add_plugin(MaterialPlugin::<CustomMaterial>::default())
         .add_plugin(MyComputeShaderPlugin)
         .add_startup_system(setup)
+        .add_system(rotate_camera)
         .run();
 }
 
@@ -59,8 +67,11 @@ fn setup(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     mut images: ResMut<Assets<Image>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut custom_materials: ResMut<Assets<CustomMaterial>>,
+    mut standard_materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    commands.spawn(Camera2dBundle::default());
+    // commands.spawn(Camera2dBundle::default());
     commands.spawn(SpriteBundle {
         texture: asset_server.load("icon.png"),
         ..Default::default()
@@ -82,6 +93,26 @@ fn setup(
     // ...and add it to our image asset server
     let image = images.add(image);
 
+    commands.spawn(PbrBundle {
+        mesh: meshes.add(shape::Plane::from_size(5.0).into()),
+        material: standard_materials.add(Color::rgb(0.3, 0.5, 0.3).into()),
+        ..default()
+    });
+    commands.spawn(PointLightBundle {
+        transform: Transform::from_xyz(4.0, 8.0, 4.0),
+        ..default()
+    });
+
+    commands.spawn(MaterialMeshBundle {
+        mesh: meshes.add(Mesh::from(shape::Cube { size: 1.0 })),
+        transform: Transform::from_xyz(0.0, 0.5, 0.0),
+        material: custom_materials.add(CustomMaterial {
+            color: Color::BLUE,
+            texture: image.clone(),
+        }),
+        ..default()
+    });
+
     // Setup the image to be rendered as a sprite to screen
     commands.spawn(SpriteBundle {
         sprite: Sprite {
@@ -94,7 +125,46 @@ fn setup(
 
     // Add image handle as a resource (of our type) to track
     commands.insert_resource(MyComputeShaderRenderTarget(image));
+
+    // camera
+    commands.spawn((
+        Camera3dBundle {
+            transform: Transform::from_xyz(4.0, 2.5, 4.0).looking_at(Vec3::ZERO, Vec3::Y),
+            ..default()
+        },
+        MainCamera,
+    ));
 }
+
+fn rotate_camera(mut camera: Query<&mut Transform, With<MainCamera>>, time: Res<Time>) {
+    let cam_transform = camera.single_mut().into_inner();
+
+    cam_transform.rotate_around(
+        Vec3::ZERO,
+        Quat::from_axis_angle(Vec3::Y, 45f32.to_radians() * time.delta_seconds()),
+    );
+    cam_transform.look_at(Vec3::ZERO, Vec3::Y);
+}
+
+// ----------------------------------------------------------------------------
+// Custom material plugin
+// ----------------------------------------------------------------------------
+#[derive(AsBindGroup, Debug, Clone, TypeUuid)]
+#[uuid = "0fe9fd06-cbcd-4d98-9a65-d0504dbf8f09"]
+pub struct CustomMaterial {
+    #[uniform(0)]
+    color: Color,
+    #[texture(1)]
+    #[sampler(2)]
+    texture: Handle<Image>,
+}
+
+impl Material for CustomMaterial {
+    fn fragment_shader() -> ShaderRef {
+        "shaders/custom_material_screenspace_texture.wgsl".into()
+    }
+}
+
 
 // ----------------------------------------------------------------------------
 // Compute shader plugin
@@ -190,6 +260,16 @@ pub struct MyComputeShaderPipeline {
     update_pipeline_id: CachedComputePipelineId,
 }
 
+// The uniform struct extracted from Camera.
+// Will be available for use in the compute shader.
+#[derive(Component, ShaderType, Clone)]
+pub struct ComputeUniforms {
+    // Precomputed values used when thresholding, see https://catlikecoding.com/unity/tutorials/advanced-rendering/bloom/#3.4
+    pub threshold_precomputations: Vec4,
+    pub viewport: Vec4,
+    pub aspect: f32,
+}
+
 // implement the FromWorld trait on our pipeline, which allows it to
 // initialize from a given world context when created as a resource to the RenderApp
 impl FromWorld for MyComputeShaderPipeline {
@@ -197,23 +277,35 @@ impl FromWorld for MyComputeShaderPipeline {
     // Returns an instance of self: an initialized MyComputeShaderPipeline.
     fn from_world(world: &mut World) -> Self {
         // Setup members of struct
+        let uniform = BindGroupLayoutEntry {
+            binding: 0,
+            visibility: ShaderStages::COMPUTE,
+            ty: BindingType::Buffer {
+                ty: BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: Some(ComputeUniforms::min_size()),
+            },
+            count: None,
+        };
+
+        let texture = BindGroupLayoutEntry {
+            binding: 1,
+            visibility: ShaderStages::COMPUTE,
+            ty: BindingType::StorageTexture {
+                access: StorageTextureAccess::ReadWrite,
+                format: TextureFormat::Rgba8Unorm,
+                view_dimension: TextureViewDimension::D2,
+            },
+            count: None,
+        };
         // Define the layout of the bind group, ie. the members to bind to the shader.
         // This layout is referenced when queuing the bind group to the shader.
-        let texture_bind_group_layout =
+        let bind_group_layout =
             world
                 .resource::<RenderDevice>()
                 .create_bind_group_layout(&BindGroupLayoutDescriptor {
                     label: Some("my_rendertexture_bindgroup_layout"),
-                    entries: &[BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: ShaderStages::COMPUTE,
-                        ty: BindingType::StorageTexture {
-                            access: StorageTextureAccess::ReadWrite,
-                            format: TextureFormat::Rgba8Unorm,
-                            view_dimension: TextureViewDimension::D2,
-                        },
-                        count: None,
-                    }],
+                    entries: &[uniform, texture],
                 });
         // Load the shader
         let shader = world
@@ -223,7 +315,7 @@ impl FromWorld for MyComputeShaderPipeline {
         let pipeline_cache = world.resource::<PipelineCache>();
         let init_pipeline_id = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some(Cow::from("my_compute_pipeline_init")),
-            layout: vec![texture_bind_group_layout.clone()],
+            layout: vec![bind_group_layout.clone()],
             push_constant_ranges: Vec::new(),
             shader: shader.clone(),
             shader_defs: vec![],
@@ -231,7 +323,7 @@ impl FromWorld for MyComputeShaderPipeline {
         });
         let update_pipeline_id = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some(Cow::from("my_compute_pipeline_update")),
-            layout: vec![texture_bind_group_layout.clone()],
+            layout: vec![bind_group_layout.clone()],
             push_constant_ranges: Vec::new(),
             shader,
             shader_defs: vec![],
@@ -240,7 +332,7 @@ impl FromWorld for MyComputeShaderPipeline {
 
         // Construct pipeline object and return
         MyComputeShaderPipeline {
-            texture_bind_group_layout,
+            bind_group_layout,
             init_pipeline_id,
             update_pipeline_id,
         }
