@@ -264,8 +264,6 @@ pub struct MyComputeShaderPipeline {
 // Will be available for use in the compute shader.
 #[derive(Component, ShaderType, Clone)]
 pub struct ComputeUniforms {
-    // Precomputed values used when thresholding, see https://catlikecoding.com/unity/tutorials/advanced-rendering/bloom/#3.4
-    pub threshold_precomputations: Vec4,
     pub viewport: Vec4,
     pub aspect: f32,
 }

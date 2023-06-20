@@ -1,4 +1,5 @@
 struct Display {
+    aspect_ratio: vec4<f32>,
     aspect_ratio: f32,
 };
 
