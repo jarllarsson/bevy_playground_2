@@ -7,16 +7,16 @@
 use bevy::{
     prelude::*,
     reflect::TypeUuid,
-    render::render_resource::{AsBindGroup, ShaderRef},
     render::{
         extract_resource::{ExtractResource, ExtractResourcePlugin},
         render_asset::RenderAssets,
-        render_graph::{self, RenderGraph},
+        render_graph::{self, RenderGraph, SlotInfo, SlotType},
         render_resource::*,
         renderer::{RenderContext, RenderDevice},
+        view::{ViewUniform, ViewUniforms, ViewUniformOffset, ExtractedView},
         RenderApp, RenderSet,
     },
-    window::WindowPlugin,
+    window::WindowPlugin, core_pipeline::core_3d,
 };
 // Moo. "clone on write", ie keep a ref until change is needed, then clone (https://doc.rust-lang.org/std/borrow/enum.Cow.html)
 use std::borrow::Cow;
@@ -39,23 +39,29 @@ struct MyComputeShaderRenderTarget(Handle<Image>);
 
 // Custom struct containing bind group of resources for our shader.
 #[derive(Resource)]
-struct MyComputeShaderRenderTargetBindGroup(BindGroup);
+struct MyComputeShaderBindGroup(BindGroup);
 
 #[derive(Component)]
 struct MainCamera;
 
-
 fn main() {
     App::new()
         //.insert_resource(ClearColor(Color::BLACK))
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                // uncomment for unthrottled FPS
-                // present_mode: bevy::window::PresentMode::AutoNoVsync,
-                ..default()
-            }),
-            ..default()
-        }))
+        .add_plugins(
+            DefaultPlugins
+                .set(AssetPlugin {
+                    watch_for_changes: true, // Enable hot-reload
+                    ..default()
+                })
+                .set(WindowPlugin {
+                    primary_window: Some(Window {
+                        // uncomment for unthrottled FPS
+                        // present_mode: bevy::window::PresentMode::AutoNoVsync,
+                        ..default()
+                    }),
+                    ..default()
+                }),
+        )
         .add_plugin(MaterialPlugin::<CustomMaterial>::default())
         .add_plugin(MyComputeShaderPlugin)
         .add_startup_system(setup)
@@ -65,17 +71,12 @@ fn main() {
 
 fn setup(
     mut commands: Commands,
-    asset_server: Res<AssetServer>,
+    //asset_server: Res<AssetServer>,
     mut images: ResMut<Assets<Image>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut custom_materials: ResMut<Assets<CustomMaterial>>,
     mut standard_materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    // commands.spawn(Camera2dBundle::default());
-    commands.spawn(SpriteBundle {
-        texture: asset_server.load("icon.png"),
-        ..Default::default()
-    });
 
     // Create main presentation texture and compute render target resource...
     let mut image = Image::new_fill(
@@ -107,19 +108,9 @@ fn setup(
         mesh: meshes.add(Mesh::from(shape::Cube { size: 1.0 })),
         transform: Transform::from_xyz(0.0, 0.5, 0.0),
         material: custom_materials.add(CustomMaterial {
-            color: Color::BLUE,
+            color: Color::WHITE,
             texture: image.clone(),
         }),
-        ..default()
-    });
-
-    // Setup the image to be rendered as a sprite to screen
-    commands.spawn(SpriteBundle {
-        sprite: Sprite {
-            custom_size: Some(Vec2::new(SIZE.0 as f32, SIZE.1 as f32)),
-            ..default()
-        },
-        texture: image.clone(),
         ..default()
     });
 
@@ -165,7 +156,6 @@ impl Material for CustomMaterial {
     }
 }
 
-
 // ----------------------------------------------------------------------------
 // Compute shader plugin
 // Here is where we encapsulate all our compute shader stuff.
@@ -203,17 +193,30 @@ impl Plugin for MyComputeShaderPlugin {
             .init_resource::<MyComputeShaderPipeline>()
             .add_system(queue_bind_group.in_set(RenderSet::Queue));
 
-        // Create render graph node for our shader.
-        // It defines the dependencies our shader and its resources has to others, and schedules it.
+        // Create render graph node for our shader. It defines the dependencies our shader and its resources has to others.
+        let node = MyComputeShaderNode::new(&mut render_app.world);
+        // Get the scheduling graph to add our node to.
         let mut render_graph = render_app.world.resource_mut::<RenderGraph>();
         const MY_COMPUTE_NODE_NAME: &str = "my_compute_node";
+
         // Make the node
-        render_graph.add_node(MY_COMPUTE_NODE_NAME, MyComputeShaderNode::default());
+        render_graph.add_node(MY_COMPUTE_NODE_NAME, node);
         // Schedule node to run before the camera node, check for OK with unwrap (panics if not)
+        
         render_graph.add_node_edge(
             MY_COMPUTE_NODE_NAME,
             bevy::render::main_graph::node::CAMERA_DRIVER,
         );
+        let input_node_id = render_graph.set_input(vec![SlotInfo::new(
+            "view_entity",
+            SlotType::Entity,
+        )]);
+        render_graph.add_slot_edge(
+            input_node_id,
+            core_3d::graph::input::VIEW_ENTITY,
+            MY_COMPUTE_NODE_NAME,
+            MyComputeShaderNode::IN_VIEW,
+        )
     }
 }
 
@@ -229,21 +232,39 @@ fn queue_bind_group(
     pipeline: Res<MyComputeShaderPipeline>,
     gpu_images: Res<RenderAssets<Image>>,
     render_target: Res<MyComputeShaderRenderTarget>,
+    view_uniforms: Res<ViewUniforms>,
     device: Res<RenderDevice>,
 ) {
-    // Fetch gpu view of our render target.
-    // We can use * on render_target to get the handle to borrow as MyComputeShaderRenderTarget derives Deref (otherwise use .0).
-    let view = &gpu_images[&*render_target];
-    // Bind the view to a new bind group (I assume if we have more resources we add them to the same group as make sense based on lifetimes)
-    let bind_group = device.create_bind_group(&BindGroupDescriptor {
-        label: Some("my_rendertexture_bindgroup"),
-        layout: &pipeline.texture_bind_group_layout,
-        entries: &[BindGroupEntry {
+    if let (
+        Some(view_binding),
+        Some(render_target_view),
+        ) = (
+        view_uniforms.uniforms.binding(),
+        gpu_images.get(&*render_target),
+    ) {
+
+        // Fetch gpu view of our render target.
+        // We can use * on render_target to get the handle to borrow as MyComputeShaderRenderTarget derives Deref (otherwise use .0).
+        // let render_target_view = &gpu_images[&*render_target];
+
+        let view_entry = BindGroupEntry {
             binding: 0,
-            resource: BindingResource::TextureView(&view.texture_view),
-        }],
-    });
-    commands.insert_resource(MyComputeShaderRenderTargetBindGroup(bind_group))
+            resource: view_binding.clone(),
+        };
+
+        let texture_entry = BindGroupEntry {
+            binding: 1,
+            resource: BindingResource::TextureView(&render_target_view.texture_view),
+        };
+
+        // Bind the view to a new bind group (I assume if we have more resources we add them to the same group as make sense based on lifetimes)
+        let bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("my_rendertexture_bindgroup"),
+            layout: &pipeline.texture_bind_group_layout,
+            entries: &[view_entry, texture_entry],
+        });
+        commands.insert_resource(MyComputeShaderBindGroup(bind_group))
+    }
 }
 
 // -------------------------------------------------------------
@@ -268,14 +289,14 @@ pub struct ComputeUniforms {
     pub aspect: f32,
 }
 
-// implement the FromWorld trait on our pipeline, which allows it to
+// Implement the FromWorld trait on our pipeline, which allows it to
 // initialize from a given world context when created as a resource to the RenderApp
 impl FromWorld for MyComputeShaderPipeline {
     // Override the from_world function to do setups when given world context
     // Returns an instance of self: an initialized MyComputeShaderPipeline.
     fn from_world(world: &mut World) -> Self {
         // Setup members of struct
-        let uniform = BindGroupLayoutEntry {
+        /*let uniform_layout = BindGroupLayoutEntry {
             binding: 0,
             visibility: ShaderStages::COMPUTE,
             ty: BindingType::Buffer {
@@ -284,9 +305,20 @@ impl FromWorld for MyComputeShaderPipeline {
                 min_binding_size: Some(ComputeUniforms::min_size()),
             },
             count: None,
+        };*/
+
+        let view_layout = BindGroupLayoutEntry {
+            binding: 0,
+            visibility: ShaderStages::COMPUTE,
+            ty: BindingType::Buffer {
+                ty: BufferBindingType::Uniform,
+                has_dynamic_offset: true,
+                min_binding_size: Some(ViewUniform::min_size()),
+            },
+            count: None,
         };
 
-        let texture = BindGroupLayoutEntry {
+        let texture_layout = BindGroupLayoutEntry {
             binding: 1,
             visibility: ShaderStages::COMPUTE,
             ty: BindingType::StorageTexture {
@@ -303,7 +335,7 @@ impl FromWorld for MyComputeShaderPipeline {
                 .resource::<RenderDevice>()
                 .create_bind_group_layout(&BindGroupLayoutDescriptor {
                     label: Some("my_rendertexture_bindgroup_layout"),
-                    entries: &[uniform, texture],
+                    entries: &[view_layout, texture_layout],
                 });
         // Load the shader
         let shader = world
@@ -330,9 +362,9 @@ impl FromWorld for MyComputeShaderPipeline {
 
         // Construct pipeline object and return
         MyComputeShaderPipeline {
-            bind_group_layout,
-            init_pipeline_id,
-            update_pipeline_id,
+            texture_bind_group_layout: bind_group_layout,
+            init_pipeline_id: init_pipeline_id,
+            update_pipeline_id: update_pipeline_id,
         }
     }
 }
@@ -352,20 +384,31 @@ enum MyComputeShaderState {
 }
 
 struct MyComputeShaderNode {
+    view_query: QueryState<&'static ViewUniformOffset, With<ExtractedView>>,
     state: MyComputeShaderState,
 }
 
-impl Default for MyComputeShaderNode {
-    fn default() -> Self {
+impl MyComputeShaderNode {
+    pub const IN_VIEW: &'static str = "view";
+
+    // Implement new for this struct as we need to setup the query state for the view struct given the render app world object.
+    pub fn new(world: &mut World) -> Self {
         Self {
             state: MyComputeShaderState::Loading,
+            view_query: QueryState::new(world),
         }
     }
 }
 
 impl render_graph::Node for MyComputeShaderNode {
+    fn input(&self) -> Vec<SlotInfo> {
+        vec![SlotInfo::new(Self::IN_VIEW, SlotType::Entity)]
+    }
+    
     // Update function of node, used to update states if the shader asset becomes loaded or has been first run-inited.
     fn update(&mut self, world: &mut World) {
+        // self.view_query.update_archetypes(world);
+
         let pipeline = world.resource::<MyComputeShaderPipeline>();
         let pipeline_cache = world.resource::<PipelineCache>();
 
@@ -401,11 +444,13 @@ impl render_graph::Node for MyComputeShaderNode {
     // Run/Dispatch shaders depending on state of node
     fn run(
         &self,
-        _graph: &mut render_graph::RenderGraphContext,
+        graph: &mut render_graph::RenderGraphContext,
         render_context: &mut RenderContext,
         world: &World,
     ) -> Result<(), render_graph::NodeRunError> {
-        let texture_bind_group = &world.resource::<MyComputeShaderRenderTargetBindGroup>().0;
+
+        let view_entity = graph.get_input_entity(Self::IN_VIEW)?;
+        let bind_group = &world.resource::<MyComputeShaderBindGroup>().0;
         let pipeline = world.resource::<MyComputeShaderPipeline>();
         let pipeline_cache = world.resource::<PipelineCache>();
 
@@ -415,7 +460,13 @@ impl render_graph::Node for MyComputeShaderNode {
                 .begin_compute_pass(&ComputePassDescriptor {
                     label: Some("my_compute_pass"),
                 });
-        pass.set_bind_group(0, texture_bind_group, &[]);
+
+        // Find the dynamic offset for the engine's view uniform buffer
+        let Ok(view_uniform_offset) = self.view_query.get_manual(world, view_entity)
+        else { return Ok(()) };
+
+        // Set our bindgroup and also supply the offset for the view uniform
+        pass.set_bind_group(0, bind_group, &[view_uniform_offset.offset]);
 
         // Select pipeline based on the state
         match self.state {
