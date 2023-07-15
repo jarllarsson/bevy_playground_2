@@ -1,10 +1,9 @@
-struct Display {
-    aspect_ratio: vec4<f32>,
-    aspect_ratio: f32,
+struct UniformTest {
+    test: f32,
 };
 
 @group(0) @binding(0)
-var<uniform> display: Display;
+var<uniform> test: UniformTest;
 @group(0) @binding(1)
 var texture: texture_storage_2d<rgba8unorm, read_write>;
 
@@ -34,7 +33,7 @@ fn update(
     let fLocation = vec2<f32>(f32(global_thread_idx.x) / (f32(num_workgroups.x) * 8.0), f32(global_thread_idx.y) / (f32(num_workgroups.y) * 8.0));
 
     let dist = distance(fLocation.xy, vec2<f32>(0.5, 0.5));
-    let color = vec4<f32>(display.aspect_ratio, dist, dist, 1.0);
+    let color = vec4<f32>(test.test, dist, dist, 1.0);
 
     textureStore(texture, location, color);
 }
